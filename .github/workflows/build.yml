@@ -1,29 +1,43 @@
-name: Build MobileGlues for iOS
-on: [push, workflow_dispatch]
+name: Build MobileGlues Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
 jobs:
-  build-ios:
-    runs-on: macos-latest
+  build-android:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Build MobileGlues
-        run: |
-          cd MobileGlues-cpp
-          wget https://github.com/leetal/ios-cmake/raw/master/ios.toolchain.cmake
-          cmake -B build \
-            -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
-            -DSTATICLIB=OFF \
-            -DMACOS=ON \
-            -DPLATFORM=OS64 \
-            -DCMAKE_C_FLAGS=-Wno-error=implicit-function-declaration
-          cmake --build build --config RelWithDebInfo --target mobileglues
-          codesign -s - build/libmobileglues.dylib
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+          link-to-sdk: true
 
-      - name: Upload lib
+      - name: CMake arm64-v8a
+        run: |
+          export ANDROID_NDK_HOME="${{ steps.setup-ndk.outputs.ndk-path }}"
+          cd MobileGlues-cpp
+          cmake -B build-android \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSTATICLIB=OFF
+          cmake --build build-android --target mobileglues -j"$(nproc)"
+          find build-android -name 'libmobileglues.so' -print
+
+      - name: Upload .so
         uses: actions/upload-artifact@v4
         with:
-          name: MobileGlues-iOS-dylib
-          path: /Users/runner/work/MobileGlues/MobileGlues/MobileGlues-cpp/build
+          name: libmobileglues-arm64
+          path: |
+            MobileGlues-cpp/build-android/**/libmobileglues.so
+           
