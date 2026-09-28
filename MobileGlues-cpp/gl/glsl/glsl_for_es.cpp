@@ -248,21 +248,8 @@ std::string process_uniform_declarations(const std::string& glslCode) {
 
     result.reserve(glslCode.length());
 
-    auto is_ident_char = [](unsigned char c) {
-        return std::isalnum(c) || c == '_';
-    };
-
     while (scan_pos < length) {
-        /* Minecraft 26.3 RenderPearl names UBOs `_uniform` / `_instance_00_00`.
-           Matching the substring "uniform" inside those identifiers produced:
-             '_uniform' : undeclared identifier
-             '_instance_00_00' : Syntax error
-           Only treat a whole-word `uniform` keyword. */
-        const bool uniform_kw =
-            glslCode.compare(scan_pos, 7, "uniform") == 0 &&
-            (scan_pos == 0 || !is_ident_char(static_cast<unsigned char>(glslCode[scan_pos - 1]))) &&
-            (scan_pos + 7 >= length || !is_ident_char(static_cast<unsigned char>(glslCode[scan_pos + 7])));
-        if (uniform_kw) {
+        if (glslCode.compare(scan_pos, 7, "uniform") == 0) {
             if (scan_pos > chunk_start) {
                 result.append(glslCode, chunk_start, scan_pos - chunk_start);
             }
@@ -321,30 +308,6 @@ std::string process_uniform_declarations(const std::string& glslCode) {
 
             while (scan_pos < length && std::isspace(glslCode[scan_pos]))
                 ++scan_pos;
-
-            /* Uniform block: `uniform Name { ... } inst;` — do not flatten. */
-            if (scan_pos < length && glslCode[scan_pos] == '{') {
-                int depth = 0;
-                size_t block_end = scan_pos;
-                while (block_end < length) {
-                    if (glslCode[block_end] == '{') ++depth;
-                    else if (glslCode[block_end] == '}') {
-                        --depth;
-                        if (depth == 0) {
-                            ++block_end;
-                            break;
-                        }
-                    }
-                    ++block_end;
-                }
-                size_t decl_end = glslCode.find(';', block_end);
-                if (decl_end == std::string::npos) decl_end = length;
-                else ++decl_end;
-                result.append(glslCode, decl_start, decl_end - decl_start);
-                scan_pos = chunk_start = decl_end;
-                continue;
-            }
-
             const size_t name_start = scan_pos;
             while (scan_pos < length && (std::isalnum(glslCode[scan_pos]) || glslCode[scan_pos] == '_')) {
                 ++scan_pos;
