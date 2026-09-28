@@ -1,0 +1,12 @@
+{
+  "enableANGLE": 0,
+  "enableNoError": 3,
+  "enableExtTimerQuery": 0,
+  "enableExtComputeShader": 1,
+  "enableExtDirectStateAccess": 0,
+  "maxGlslCacheSize": 32,
+  "angleDepthClearFixMode": 0,
+  "customGLVersion": 40,
+  "fsr1Setting": 0,
+  "mc26_3Compat": 1
+}

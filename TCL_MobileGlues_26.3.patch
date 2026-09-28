@@ -1,0 +1,427 @@
+--- orig/MobileGlues-main/MobileGlues-cpp/config/settings.cpp	2026-09-22 23:08:42.000000000 +0000
++++ MobileGlues-main/MobileGlues-cpp/config/settings.cpp	2026-09-28 03:53:59.725624012 +0000
+@@ -32,6 +32,7 @@
+     global_settings.custom_gl_version = {0, 0, 0}; // will go default
+     global_settings.fsr1_setting = FSR1_Quality_Preset::Disabled;
+     global_settings.hide_mg_env_level = HideMGEnvLevel::Disabled;
++    global_settings.mc26_3_compat = false;
+ 
+ #else
+ 
+@@ -59,6 +60,12 @@
+     HideMGEnvLevel hideMGEnvLevel =
+         success ? static_cast<HideMGEnvLevel>(config_get_int("hideMGEnvLevel")) : HideMGEnvLevel::Disabled;
+ 
++    // Minecraft 26.3 changed the OpenGL path substantially: ShaderC is now used
++    // for OpenGL too, terrain uses MultiDrawIndirect on capable devices, and the
++    // new core shaders rely on the 26.3 pipeline semantics.  Keep this profile
++    // opt-in so older Minecraft versions retain the normal MobileGlues behavior.
++    const bool mc26_3_compat = success && config_get_int("mc26_3Compat") == 1;
++
+     if (customGLVersionInt < 0) {
+         customGLVersionInt = 0;
+     }
+@@ -124,8 +131,14 @@
+ 
+     LOG_V("MG_DIR_PATH = %s", mg_directory_path ? mg_directory_path : "(default)")
+ 
+-    if (isInPluginApp == 0 && fclVersion == 0 && zlVersion == 0 && pgwVersion == 0 && !is_custom_mg_dir) {
+-        LOG_V("Unsupported launcher detected, force using default config.")
++    // A launcher is allowed to use the standalone renderer as long as a valid
++    // config.json was loaded.  The old check discarded a perfectly valid
++    // /sdcard/MG/config.json whenever the launcher did not export one of the
++    // historical launcher environment variables.  That made settings appear to
++    // be ignored (notably enableNoError and the MultiDraw order).
++    if (isInPluginApp == 0 && fclVersion == 0 && zlVersion == 0 && pgwVersion == 0 && !is_custom_mg_dir &&
++        !success) {
++        LOG_V("Unsupported launcher detected and no valid config was loaded; force using default config.")
+         angleConfig = AngleConfig::DisableIfPossible;
+         noErrorConfig = NoErrorConfig::Auto;
+         enableExtComputeShader = false;
+@@ -137,6 +150,18 @@
+         hideMGEnvLevel = HideMGEnvLevel::Disabled;
+     }
+ 
++    if (mc26_3_compat) {
++        // 26.3 requires shader/program errors to be ignored by the MobileGlues
++        // compatibility layer.  Level2 is the existing "Full" behavior.
++        noErrorConfig = NoErrorConfig::Level2;
++
++        // DSA is a separate compatibility layer.  Disable it in the 26.3 safe
++        // profile so a DSA translation problem cannot turn a valid render pass
++        // into a black frame.
++        enableExtDirectStateAccess = false;
++        LOG_V("[MobileGlues] 26.3 compatibility profile enabled: Full error ignoring + DSA disabled + safe MultiDraw order")
++    }
++
+     AngleMode finalAngleMode = AngleMode::Disabled;
+     std::string gpuString = getGPUInfo();
+     const char* gpu_cstr = gpuString.c_str();
+@@ -217,6 +242,7 @@
+     global_settings.custom_gl_version = customGLVersion;
+     global_settings.fsr1_setting = fsr1Setting;
+     global_settings.hide_mg_env_level = hideMGEnvLevel;
++    global_settings.mc26_3_compat = mc26_3_compat;
+ #endif
+ 
+     LOG_V("[MobileGlues] Setting: enableAngle                 = %s",
+@@ -242,6 +268,8 @@
+     LOG_V("[MobileGlues] Setting: fsr1Setting                 = %i", static_cast<int>(global_settings.fsr1_setting))
+     LOG_V("[MobileGlues] Setting: hideMGEnvLevel              = %i",
+           static_cast<int>(global_settings.hide_mg_env_level))
++    LOG_V("[MobileGlues] Setting: mc26_3Compat                = %s",
++          global_settings.mc26_3_compat ? "true" : "false")
+ 
+     GLVersion =
+         global_settings.custom_gl_version.isEmpty() ? Version(DEFAULT_GL_VERSION) : global_settings.custom_gl_version;
+@@ -527,6 +555,30 @@
+ // init_settings(): config.json is loaded but GL is not, so no capability checks
+ // happen here.
+ static void parse_multidraw_orders() {
++    // 26.3 safe profile: prefer the least magical implementation for every
++    // list-taking MultiDraw entry point.  The two Indirect entry points cannot be
++    // expressed as a plain unrolled call at this API boundary, so use the
++    // existing one-draw-per-command indirect backend there.  Capability filtering
++    // later in init_settings_post() will still remove unavailable backends.
++    if (config_get_int(const_cast<char*>("mc26_3Compat")) == 1) {
++        const char* safe_orders[MD_ENTRY_COUNT] = {
++            "unroll",   // glMultiDrawArrays
++            "unroll",   // glMultiDrawElements
++            "unroll",   // glMultiDrawElementsBaseVertex
++            "indirect", // glMultiDrawArraysIndirect
++            "indirect", // glMultiDrawElementsIndirect
++        };
++        for (int i = 0; i < MD_ENTRY_COUNT; ++i) {
++            md_order_item_t item{};
++            B b{};
++            if (!md_parse_backend(safe_orders[i], &b)) continue;
++            item.backend = b;
++            md_expand_order(static_cast<E>(i), &item, 1);
++        }
++        LOG_V("[MobileGlues] 26.3 compatibility profile: safe MultiDraw orders selected")
++        return;
++    }
++
+     md_order_item_t global_items[MD_BACKEND_COUNT + 1];
+     int global_count = 0;
+ 
+--- orig/MobileGlues-main/MobileGlues-cpp/config/settings.h	2026-09-22 23:08:42.000000000 +0000
++++ MobileGlues-main/MobileGlues-cpp/config/settings.h	2026-09-28 03:53:59.724949299 +0000
+@@ -215,6 +215,8 @@
+     Version custom_gl_version;
+     FSR1_Quality_Preset fsr1_setting;
+     HideMGEnvLevel hide_mg_env_level;
++    // Opt-in compatibility profile for Minecraft 26.3's ShaderC/SPIR-V OpenGL path.
++    bool mc26_3_compat;
+ };
+ 
+ extern global_settings_t global_settings;
+--- orig/MobileGlues-main/MobileGlues-cpp/gl/getter.cpp	2026-09-22 23:08:42.000000000 +0000
++++ MobileGlues-main/MobileGlues-cpp/gl/getter.cpp	2026-09-28 03:53:59.725794981 +0000
+@@ -23,6 +23,16 @@
+ 
+ #define DEBUG 0
+ 
++#ifndef GL_NUM_SHADER_BINARY_FORMATS
++#define GL_NUM_SHADER_BINARY_FORMATS 0x8DF9
++#endif
++#ifndef GL_SHADER_BINARY_FORMATS
++#define GL_SHADER_BINARY_FORMATS 0x8DF8
++#endif
++#ifndef GL_SHADER_BINARY_FORMAT_SPIR_V
++#define GL_SHADER_BINARY_FORMAT_SPIR_V 0x9551
++#endif
++
+ Version GLVersion;
+ 
+ namespace {
+@@ -49,6 +59,20 @@
+     case GL_CONTEXT_PROFILE_MASK:
+         (*params) = GL_CONTEXT_CORE_PROFILE_BIT;
+         break;
++    case GL_NUM_SHADER_BINARY_FORMATS:
++        if (global_settings.mc26_3_compat) {
++            *params = 1;
++        } else {
++            GLES.glGetIntegerv(pname, params);
++        }
++        break;
++    case GL_SHADER_BINARY_FORMATS:
++        if (global_settings.mc26_3_compat) {
++            *params = GL_SHADER_BINARY_FORMAT_SPIR_V;
++        } else {
++            GLES.glGetIntegerv(pname, params);
++        }
++        break;
+     case GL_NUM_EXTENSIONS:
+         static GLint num_extensions = -1;
+         if (num_extensions == -1) {
+@@ -244,6 +268,14 @@
+                                "GL_ARB_multi_bind",
+                                "GL_KHR_no_error"};
+ 
++    // Minecraft 26.3's OpenGL path uses ShaderC/SPIR-V.  Only advertise the
++    // desktop SPIR-V entry points when the compatibility profile has installed
++    // MobileGlues' SPIR-V -> ESSL implementation.
++    if (global_settings.mc26_3_compat) {
++        extensions.push_back("GL_ARB_gl_spirv");
++        extensions.push_back("GL_ARB_spirv_extensions");
++    }
++
+     extensions.insert(extensions.end(), std::begin(base_exts), std::end(base_exts));
+ 
+     if (global_settings.hide_mg_env_level >= HideMGEnvLevel::Level1) {
+--- orig/MobileGlues-main/MobileGlues-cpp/gl/shader.cpp	2026-09-22 23:08:42.000000000 +0000
++++ MobileGlues-main/MobileGlues-cpp/gl/shader.cpp	2026-09-28 03:53:05.333160692 +0000
+@@ -6,7 +6,14 @@
+ // End of Source File Header
+ 
+ #include <cctype>
++#include <cstdint>
++#include <cstring>
++#include <vector>
+ #include "shader.h"
++#include <spirv_cross/spirv.h>
++#ifndef GL_SHADER_BINARY_FORMAT_SPIR_V
++#define GL_SHADER_BINARY_FORMAT_SPIR_V 0x9551
++#endif
+ 
+ #include <GL/gl.h>
+ #include "log.h"
+@@ -23,6 +30,14 @@
+ 
+ UnorderedMap<GLuint, bool> shader_map_is_sampler_buffer_emulated;
+ 
++// Minecraft 26.3 compiles OpenGL shaders through ShaderC and submits the
++// resulting SPIR-V with glShaderBinary/glSpecializeShader.  MobileGlues used to
++// leave glSpecializeShader as a no-op stub, which means the shader object never
++// receives executable code on a GLES-only driver.  Keep the SPIR-V per shader
++// until specialization, then translate it through the same SPIRV-Cross ESSL path
++// used by GLSL conversion.
++static UnorderedMap<GLuint, std::vector<uint32_t>> shader_spirv;
++
+ bool can_run_essl3(unsigned int esversion, const char* glsl) {
+     if (strncmp(glsl, "#version 100", 12) == 0) {
+         return true;
+@@ -50,6 +65,185 @@
+     return str.find("samplerBuffer") != std::string::npos;
+ }
+ 
++static bool apply_spirv_specialization(spvc_context context, spvc_compiler compiler, GLuint count,
++                                       const GLuint* ids, const GLuint* values) {
++    if (count == 0) return true;
++    if (!ids || !values) {
++        LOG_E("glSpecializeShader: specialization arrays are null")
++        return false;
++    }
++
++    for (GLuint i = 0; i < count; ++i) {
++        spvc_constant constant = spvc_compiler_get_constant_handle(compiler, ids[i]);
++        if (!constant) {
++            LOG_W_FORCE("glSpecializeShader: specialization constant %u was not found", ids[i])
++            continue;
++        }
++
++        spvc_type type = spvc_compiler_get_type_handle(compiler, spvc_constant_get_type(constant));
++        if (!type) {
++            LOG_E("glSpecializeShader: could not inspect specialization constant %u", ids[i])
++            return false;
++        }
++
++        switch (spvc_type_get_basetype(type)) {
++        case SPVC_BASETYPE_BOOLEAN:
++            spvc_constant_set_scalar_u32(constant, 0, 0, values[i] ? 1u : 0u);
++            break;
++        case SPVC_BASETYPE_INT8:
++        case SPVC_BASETYPE_INT16:
++        case SPVC_BASETYPE_INT32:
++            spvc_constant_set_scalar_i32(constant, 0, 0, static_cast<int>(values[i]));
++            break;
++        case SPVC_BASETYPE_UINT8:
++        case SPVC_BASETYPE_UINT16:
++        case SPVC_BASETYPE_UINT32:
++            spvc_constant_set_scalar_u32(constant, 0, 0, values[i]);
++            break;
++        case SPVC_BASETYPE_INT64:
++            spvc_constant_set_scalar_i64(constant, 0, 0, static_cast<long long>(static_cast<int32_t>(values[i])));
++            break;
++        case SPVC_BASETYPE_UINT64:
++            spvc_constant_set_scalar_u64(constant, 0, 0, static_cast<unsigned long long>(values[i]));
++            break;
++        case SPVC_BASETYPE_FP16:
++            // glSpecializeShader supplies the bit pattern in a GLuint.  SPIR-V
++            // specialization constants for FP16 are uncommon in Minecraft, so
++            // preserve the low 16 bits as the scalar value expected by SPVC.
++            spvc_constant_set_scalar_u16(constant, 0, 0, static_cast<unsigned short>(values[i] & 0xffffu));
++            break;
++        case SPVC_BASETYPE_FP32: {
++            float f = 0.0f;
++            uint32_t bits = values[i];
++            std::memcpy(&f, &bits, sizeof(f));
++            spvc_constant_set_scalar_fp32(constant, 0, 0, f);
++            break;
++        }
++        case SPVC_BASETYPE_FP64: {
++            // OpenGL exposes the specialization value as 32 bits.  Zero-extend
++            // it rather than inventing a second 32-bit half.
++            spvc_constant_set_scalar_fp64(constant, 0, 0, static_cast<double>(values[i]));
++            break;
++        }
++        default:
++            LOG_W_FORCE("glSpecializeShader: unsupported specialization type %d for constant %u",
++                        static_cast<int>(spvc_type_get_basetype(type)), ids[i])
++            return false;
++        }
++    }
++    return true;
++}
++
++void glShaderBinary(GLsizei count, const GLuint* shaders, GLenum binaryformat, const void* binary, GLsizei length) {
++    LOG()
++    if (count < 0 || !shaders || !binary || length <= 0) {
++        LOG_E("glShaderBinary: invalid arguments")
++        return;
++    }
++
++    if (binaryformat != GL_SHADER_BINARY_FORMAT_SPIR_V) {
++        // Non-SPIR-V formats remain native-driver binaries.
++        GLES.glShaderBinary(count, shaders, binaryformat, binary, length);
++        CHECK_GL_ERROR
++        return;
++    }
++
++    if ((length % static_cast<GLsizei>(sizeof(uint32_t))) != 0) {
++        LOG_E("glShaderBinary: SPIR-V length %d is not 4-byte aligned", length)
++        return;
++    }
++
++    const uint32_t* words = static_cast<const uint32_t*>(binary);
++    const size_t word_count = static_cast<size_t>(length) / sizeof(uint32_t);
++    if (word_count < 5 || words[0] != 0x07230203u) {
++        LOG_E("glShaderBinary: invalid SPIR-V module (magic=0x%08x)", word_count ? words[0] : 0u)
++        return;
++    }
++
++    for (GLsizei i = 0; i < count; ++i) {
++        if (shaders[i] == 0) continue;
++        shader_spirv[shaders[i]] = std::vector<uint32_t>(words, words + word_count);
++    }
++    LOG_D("glShaderBinary: captured %d SPIR-V shader(s), %zu words", count, word_count)
++    CHECK_GL_ERROR
++}
++
++void glSpecializeShader(GLuint shader, const GLchar* pEntryPoint, GLuint numSpecializationConstants,
++                        const GLuint* pConstantIndex, const GLuint* pConstantValue) {
++    LOG()
++    auto it = shader_spirv.find(shader);
++    if (it == shader_spirv.end() || it->second.empty()) {
++        LOG_E("glSpecializeShader: no SPIR-V binary stored for shader %u", shader)
++        return;
++    }
++
++    const char* entry = (pEntryPoint && *pEntryPoint) ? pEntryPoint : "main";
++    spvc_context context = nullptr;
++    if (spvc_context_create(&context) != SPVC_SUCCESS || !context) {
++        LOG_E("glSpecializeShader: could not create SPIRV-Cross context")
++        return;
++    }
++
++    spvc_parsed_ir ir = nullptr;
++    spvc_compiler compiler = nullptr;
++    spvc_compiler_options options = nullptr;
++    const auto& spirv = it->second;
++
++    bool ok = spvc_context_parse_spirv(context, spirv.data(), spirv.size(), &ir) == SPVC_SUCCESS && ir;
++    if (ok) {
++        ok = spvc_context_create_compiler(context, SPVC_BACKEND_GLSL, ir, SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &compiler) ==
++             SPVC_SUCCESS && compiler;
++    }
++    if (ok) {
++        ok = spvc_compiler_set_entry_point(compiler, entry, SpvExecutionModelVertex) == SPVC_SUCCESS;
++        // The SPIR-V execution model above is corrected below from the shader
++        // object's GL_SHADER_TYPE.  Keeping the initial call here gives SPVC a
++        // deterministic entry point even for modules with one entry point.
++        GLint shader_type = GL_VERTEX_SHADER;
++        GLES.glGetShaderiv(shader, GL_SHADER_TYPE, &shader_type);
++        const SpvExecutionModel model = (shader_type == GL_FRAGMENT_SHADER)
++                                             ? SpvExecutionModelFragment
++                                             : (shader_type == GL_COMPUTE_SHADER ? SpvExecutionModelGLCompute
++                                                                                 : SpvExecutionModelVertex);
++        if (ok) ok = spvc_compiler_set_entry_point(compiler, entry, model) == SPVC_SUCCESS;
++    }
++    if (ok) {
++        ok = apply_spirv_specialization(context, compiler, numSpecializationConstants, pConstantIndex,
++                                         pConstantValue);
++    }
++    if (ok) {
++        ok = spvc_compiler_create_compiler_options(compiler, &options) == SPVC_SUCCESS && options;
++    }
++    if (ok) {
++        ok = spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_GLSL_VERSION,
++                                             hardware->es_version >= 300 ? hardware->es_version : 300) == SPVC_SUCCESS;
++        ok = ok && spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_GLSL_ES, SPVC_TRUE) == SPVC_SUCCESS;
++        ok = ok && spvc_compiler_install_compiler_options(compiler, options) == SPVC_SUCCESS;
++    }
++
++    const char* result = nullptr;
++    if (ok) ok = spvc_compiler_compile(compiler, &result) == SPVC_SUCCESS && result;
++
++    if (!ok) {
++        LOG_E("glSpecializeShader: SPIRV-Cross failed: %s", spvc_context_get_last_error_string(context))
++        spvc_context_destroy(context);
++        return;
++    }
++
++    std::string essl(result);
++    essl = removeLayoutBinding(essl);
++    essl = processOutColorLocations(essl);
++    essl = forceSupporterOutput(essl);
++
++    const char* src = essl.c_str();
++    GLES.glShaderSource(shader, 1, &src, nullptr);
++    GLES.glCompileShader(shader);
++    LOG_D("glSpecializeShader: translated SPIR-V shader %u to ESSL", shader)
++
++    spvc_context_destroy(context);
++    CHECK_GL_ERROR
++}
++
+ void glShaderSource(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length) {
+     LOG()
+     shaderInfo.id = 0;
+--- orig/MobileGlues-main/MobileGlues-cpp/gl/shader.h	2026-09-22 23:08:42.000000000 +0000
++++ MobileGlues-main/MobileGlues-cpp/gl/shader.h	2026-09-28 03:52:53.476728839 +0000
+@@ -32,6 +32,11 @@
+                                          const GLint* length);
+ 
+     GLAPI GLAPIENTRY void glGetShaderiv(GLuint shader, GLenum pname, GLint* params);
++    GLAPI GLAPIENTRY void glShaderBinary(GLsizei count, const GLuint* shaders, GLenum binaryformat, const void* binary,
++                                         GLsizei length);
++    GLAPI GLAPIENTRY void glSpecializeShader(GLuint shader, const GLchar* pEntryPoint,
++                                             GLuint numSpecializationConstants, const GLuint* pConstantIndex,
++                                             const GLuint* pConstantValue);
+ 
+ #ifdef __cplusplus
+ }
+--- orig/MobileGlues-main/MobileGlues-cpp/gl/gl_native.cpp	2026-09-22 23:08:42.000000000 +0000
++++ MobileGlues-main/MobileGlues-cpp/gl/gl_native.cpp	2026-09-28 03:52:53.477065165 +0000
+@@ -111,7 +111,7 @@
+ //NATIVE_FUNCTION_HEAD(void, glRenderbufferStorage, GLenum target, GLenum internalformat, GLsizei width, GLsizei height) NATIVE_FUNCTION_END_NO_RETURN(void, glRenderbufferStorage, target,internalformat,width,height)
+ NATIVE_FUNCTION_HEAD(void, glSampleCoverage, GLfloat value, GLboolean invert) NATIVE_FUNCTION_END_NO_RETURN(void, glSampleCoverage, value,invert)
+ NATIVE_FUNCTION_HEAD(void, glScissor, GLint x, GLint y, GLsizei width, GLsizei height) NATIVE_FUNCTION_END_NO_RETURN(void, glScissor, x,y,width,height)
+-NATIVE_FUNCTION_HEAD(void, glShaderBinary, GLsizei count, const GLuint *shaders, GLenum binaryformat, const void *binary, GLsizei length) NATIVE_FUNCTION_END_NO_RETURN(void, glShaderBinary, count,shaders,binaryformat,binary,length)
++// glShaderBinary is implemented in gl/shader.cpp so SPIR-V binaries can be translated to ESSL.
+ //NATIVE_FUNCTION_HEAD(void, glShaderSource, GLuint shader, GLsizei count, const GLchar *const*string, const GLint *length) NATIVE_FUNCTION_END_NO_RETURN(void, glShaderSource, shader,count,string,length)
+ NATIVE_FUNCTION_HEAD(void, glStencilFunc, GLenum func, GLint ref, GLuint mask) NATIVE_FUNCTION_END_NO_RETURN(void, glStencilFunc, func,ref,mask)
+ NATIVE_FUNCTION_HEAD(void, glStencilFuncSeparate, GLenum face, GLenum func, GLint ref, GLuint mask) NATIVE_FUNCTION_END_NO_RETURN(void, glStencilFuncSeparate, face,func,ref,mask)
+--- orig/MobileGlues-main/MobileGlues-cpp/gl/gl_stub.cpp	2026-09-22 23:08:42.000000000 +0000
++++ MobileGlues-main/MobileGlues-cpp/gl/gl_stub.cpp	2026-09-28 03:52:53.478551785 +0000
+@@ -765,7 +765,7 @@
+ STUB_FUNCTION_HEAD(void, glGetnHistogram, GLenum target, GLboolean reset, GLenum format, GLenum type, GLsizei bufSize, void* values); STUB_FUNCTION_END_NO_RETURN(void, glGetnHistogram,target,reset,format,type,bufSize,values)
+ STUB_FUNCTION_HEAD(void, glGetnMinmax, GLenum target, GLboolean reset, GLenum format, GLenum type, GLsizei bufSize, void* values); STUB_FUNCTION_END_NO_RETURN(void, glGetnMinmax,target,reset,format,type,bufSize,values)
+ STUB_FUNCTION_HEAD(void, glTextureBarrier,void); STUB_FUNCTION_END_NO_RETURN(void, glTextureBarrier,)
+-STUB_FUNCTION_HEAD(void, glSpecializeShader, GLuint shader, const GLchar* pEntryPoint, GLuint numSpecializationConstants, const GLuint* pConstantIndex, const GLuint* pConstantValue); STUB_FUNCTION_END_NO_RETURN(void, glSpecializeShader,shader,pEntryPoint,numSpecializationConstants,pConstantIndex,pConstantValue)
++// glSpecializeShader is implemented in gl/shader.cpp for Minecraft 26.3 ShaderC/SPIR-V.
+ // STUB_FUNCTION_HEAD(void, glMultiDrawArraysIndirectCount, GLenum mode, const void* indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride); STUB_FUNCTION_END_NO_RETURN(void, glMultiDrawArraysIndirectCount,mode,indirect,drawcount,maxdrawcount,stride)   // reported (not implemented) in gl/multidraw.cpp
+ // STUB_FUNCTION_HEAD(void, glMultiDrawElementsIndirectCount, GLenum mode, GLenum type, const void* indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride); STUB_FUNCTION_END_NO_RETURN(void, glMultiDrawElementsIndirectCount,mode,type,indirect,drawcount,maxdrawcount,stride)   // reported (not implemented) in gl/multidraw.cpp
+ STUB_FUNCTION_HEAD(void, glPolygonOffsetClamp, GLfloat factor, GLfloat units, GLfloat clamp); STUB_FUNCTION_END_NO_RETURN(void, glPolygonOffsetClamp,factor,units,clamp)
