@@ -215,6 +215,8 @@ struct global_settings_t {
     Version custom_gl_version;
     FSR1_Quality_Preset fsr1_setting;
     HideMGEnvLevel hide_mg_env_level;
+    // Opt-in compatibility profile for Minecraft 26.3's ShaderC/SPIR-V OpenGL path.
+    bool mc26_3_compat;
 };
 
 extern global_settings_t global_settings;

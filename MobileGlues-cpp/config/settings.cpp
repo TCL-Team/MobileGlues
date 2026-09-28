@@ -32,6 +32,7 @@ void init_settings() {
     global_settings.custom_gl_version = {0, 0, 0}; // will go default
     global_settings.fsr1_setting = FSR1_Quality_Preset::Disabled;
     global_settings.hide_mg_env_level = HideMGEnvLevel::Disabled;
+    global_settings.mc26_3_compat = false;
 
 #else
 
@@ -58,6 +59,12 @@ void init_settings() {
         success ? static_cast<FSR1_Quality_Preset>(config_get_int("fsr1Setting")) : FSR1_Quality_Preset::Disabled;
     HideMGEnvLevel hideMGEnvLevel =
         success ? static_cast<HideMGEnvLevel>(config_get_int("hideMGEnvLevel")) : HideMGEnvLevel::Disabled;
+
+    // Minecraft 26.3 changed the OpenGL path substantially: ShaderC is now used
+    // for OpenGL too, terrain uses MultiDrawIndirect on capable devices, and the
+    // new core shaders rely on the 26.3 pipeline semantics.  Keep this profile
+    // opt-in so older Minecraft versions retain the normal MobileGlues behavior.
+    const bool mc26_3_compat = success && config_get_int("mc26_3Compat") == 1;
 
     if (customGLVersionInt < 0) {
         customGLVersionInt = 0;
@@ -124,8 +131,14 @@ void init_settings() {
 
     LOG_V("MG_DIR_PATH = %s", mg_directory_path ? mg_directory_path : "(default)")
 
-    if (isInPluginApp == 0 && fclVersion == 0 && zlVersion == 0 && pgwVersion == 0 && !is_custom_mg_dir) {
-        LOG_V("Unsupported launcher detected, force using default config.")
+    // A launcher is allowed to use the standalone renderer as long as a valid
+    // config.json was loaded.  The old check discarded a perfectly valid
+    // /sdcard/MG/config.json whenever the launcher did not export one of the
+    // historical launcher environment variables.  That made settings appear to
+    // be ignored (notably enableNoError and the MultiDraw order).
+    if (isInPluginApp == 0 && fclVersion == 0 && zlVersion == 0 && pgwVersion == 0 && !is_custom_mg_dir &&
+        !success) {
+        LOG_V("Unsupported launcher detected and no valid config was loaded; force using default config.")
         angleConfig = AngleConfig::DisableIfPossible;
         noErrorConfig = NoErrorConfig::Auto;
         enableExtComputeShader = false;
@@ -135,6 +148,18 @@ void init_settings() {
         angleDepthClearFixMode = AngleDepthClearFixMode::Disabled;
         fsr1Setting = FSR1_Quality_Preset::Disabled;
         hideMGEnvLevel = HideMGEnvLevel::Disabled;
+    }
+
+    if (mc26_3_compat) {
+        // 26.3 requires shader/program errors to be ignored by the MobileGlues
+        // compatibility layer.  Level2 is the existing "Full" behavior.
+        noErrorConfig = NoErrorConfig::Level2;
+
+        // DSA is a separate compatibility layer.  Disable it in the 26.3 safe
+        // profile so a DSA translation problem cannot turn a valid render pass
+        // into a black frame.
+        enableExtDirectStateAccess = false;
+        LOG_V("[MobileGlues] 26.3 compatibility profile enabled: Full error ignoring + DSA disabled + safe MultiDraw order")
     }
 
     AngleMode finalAngleMode = AngleMode::Disabled;
@@ -217,6 +242,7 @@ void init_settings() {
     global_settings.custom_gl_version = customGLVersion;
     global_settings.fsr1_setting = fsr1Setting;
     global_settings.hide_mg_env_level = hideMGEnvLevel;
+    global_settings.mc26_3_compat = mc26_3_compat;
 #endif
 
     LOG_V("[MobileGlues] Setting: enableAngle                 = %s",
@@ -242,6 +268,8 @@ void init_settings() {
     LOG_V("[MobileGlues] Setting: fsr1Setting                 = %i", static_cast<int>(global_settings.fsr1_setting))
     LOG_V("[MobileGlues] Setting: hideMGEnvLevel              = %i",
           static_cast<int>(global_settings.hide_mg_env_level))
+    LOG_V("[MobileGlues] Setting: mc26_3Compat                = %s",
+          global_settings.mc26_3_compat ? "true" : "false")
 
     GLVersion =
         global_settings.custom_gl_version.isEmpty() ? Version(DEFAULT_GL_VERSION) : global_settings.custom_gl_version;
@@ -527,6 +555,30 @@ static void md_expand_order(E e, const md_order_item_t* items, int item_count) {
 // init_settings(): config.json is loaded but GL is not, so no capability checks
 // happen here.
 static void parse_multidraw_orders() {
+    // 26.3 safe profile: prefer the least magical implementation for every
+    // list-taking MultiDraw entry point.  The two Indirect entry points cannot be
+    // expressed as a plain unrolled call at this API boundary, so use the
+    // existing one-draw-per-command indirect backend there.  Capability filtering
+    // later in init_settings_post() will still remove unavailable backends.
+    if (config_get_int(const_cast<char*>("mc26_3Compat")) == 1) {
+        const char* safe_orders[MD_ENTRY_COUNT] = {
+            "unroll",   // glMultiDrawArrays
+            "unroll",   // glMultiDrawElements
+            "unroll",   // glMultiDrawElementsBaseVertex
+            "indirect", // glMultiDrawArraysIndirect
+            "indirect", // glMultiDrawElementsIndirect
+        };
+        for (int i = 0; i < MD_ENTRY_COUNT; ++i) {
+            md_order_item_t item{};
+            B b{};
+            if (!md_parse_backend(safe_orders[i], &b)) continue;
+            item.backend = b;
+            md_expand_order(static_cast<E>(i), &item, 1);
+        }
+        LOG_V("[MobileGlues] 26.3 compatibility profile: safe MultiDraw orders selected")
+        return;
+    }
+
     md_order_item_t global_items[MD_BACKEND_COUNT + 1];
     int global_count = 0;
 
