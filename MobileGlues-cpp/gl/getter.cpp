@@ -23,6 +23,16 @@
 
 #define DEBUG 0
 
+#ifndef GL_NUM_SHADER_BINARY_FORMATS
+#define GL_NUM_SHADER_BINARY_FORMATS 0x8DF9
+#endif
+#ifndef GL_SHADER_BINARY_FORMATS
+#define GL_SHADER_BINARY_FORMATS 0x8DF8
+#endif
+#ifndef GL_SHADER_BINARY_FORMAT_SPIR_V
+#define GL_SHADER_BINARY_FORMAT_SPIR_V 0x9551
+#endif
+
 Version GLVersion;
 
 namespace {
@@ -48,6 +58,20 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         return;
     case GL_CONTEXT_PROFILE_MASK:
         (*params) = GL_CONTEXT_CORE_PROFILE_BIT;
+        break;
+    case GL_NUM_SHADER_BINARY_FORMATS:
+        if (global_settings.mc26_3_compat) {
+            *params = 1;
+        } else {
+            GLES.glGetIntegerv(pname, params);
+        }
+        break;
+    case GL_SHADER_BINARY_FORMATS:
+        if (global_settings.mc26_3_compat) {
+            *params = GL_SHADER_BINARY_FORMAT_SPIR_V;
+        } else {
+            GLES.glGetIntegerv(pname, params);
+        }
         break;
     case GL_NUM_EXTENSIONS:
         static GLint num_extensions = -1;
@@ -243,6 +267,13 @@ void InitGLESBaseExtensions() {
                                "GL_ARB_separate_shader_objects",
                                "GL_ARB_multi_bind",
                                "GL_KHR_no_error"};
+
+    // Minecraft 26.3's OpenGL path uses ShaderC/SPIR-V.  Only advertise the
+    // desktop SPIR-V entry points when the compatibility profile has installed
+    // MobileGlues' SPIR-V -> ESSL implementation.
+    if (global_settings.mc26_3_compat) {
+        extensions.push_back("GL_ARB_gl_spirv");
+    }
 
     extensions.insert(extensions.end(), std::begin(base_exts), std::end(base_exts));
 

@@ -32,6 +32,11 @@ extern "C"
                                          const GLint* length);
 
     GLAPI GLAPIENTRY void glGetShaderiv(GLuint shader, GLenum pname, GLint* params);
+    GLAPI GLAPIENTRY void glShaderBinary(GLsizei count, const GLuint* shaders, GLenum binaryformat, const void* binary,
+                                         GLsizei length);
+    GLAPI GLAPIENTRY void glSpecializeShader(GLuint shader, const GLchar* pEntryPoint,
+                                             GLuint numSpecializationConstants, const GLuint* pConstantIndex,
+                                             const GLuint* pConstantValue);
 
 #ifdef __cplusplus
 }
